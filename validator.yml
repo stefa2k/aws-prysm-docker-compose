@@ -1,0 +1,727 @@
+---
+AWSTemplateFormatVersion: "2010-09-09"
+Description: prysm-docker-compose on AWS EC2.
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: # Application Group
+          default: Application Configuration
+        Parameters:
+          - ApplicationInstanceType
+          - ApplicationInstanceStorageSize
+          - ApplicationInstanceStorageType
+          - ApplicationInstanceStorageIOPS
+          - Ubuntu18ImageId
+          - ApplicationName
+
+    ParameterLabels:
+      # Application Label
+      ApplicationInstanceType:
+        default: ApplicationInstanceType
+      ApplicationInstanceStorageSize:
+        default: ApplicationInstanceStorageSize
+      ApplicationInstanceStorageType:
+        default: ApplicationInstanceStorageType
+      ApplicationInstanceStorageIOPS:
+        default: ApplicationInstanceStorageIOPS
+      ApplicationKeyName:
+        default: ApplicationKeyName
+      Ubuntu18ImageId:
+        default: Ubuntu18ImageId
+      ApplicationName:
+        default: ApplicationName
+Parameters:
+  # Application Parameters
+  ApplicationInstanceType:
+    Description: Application server EC2 instance type
+    Type: String
+    Default: c5d.large
+  ApplicationInstanceStorageSize:
+    Description: Application server storage size (in GBs)
+    Type: Number
+    Default: "100"
+  ApplicationInstanceStorageType:
+    Description: "Application server storage type. Allowed values are: standard, io1, gp2."
+    Type: String
+    Default: standard
+    AllowedValues:
+      - standard
+      - io1
+      - gp2
+  ApplicationInstanceStorageIOPS:
+    Description: Application server storage IOPS. Used only when storage type is set to
+      io1.
+    Type: Number
+    MinValue: "100"
+    MaxValue: "20000"
+    Default: 100
+  Ubuntu18ImageId:
+    Description: ImageId for Ubuntu18 (Change this if your not in us-east-1)
+    Type: String
+    Default: ami-0817d428a6fb68645
+  ApplicationName:
+    Description: Application Name
+    Type: String
+    Default: prysm
+
+Conditions:
+  ApplicationStorageWithIOPSCondition: !Equals [!Ref ApplicationInstanceStorageType, io1]
+
+Resources:
+  # Network
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Ref AWS::StackName
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select
+        - 0
+        - Fn::GetAZs: !Ref "AWS::Region"
+      CidrBlock: 10.0.254.0/24
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-PublicSubnet1
+      VpcId: !Ref VPC
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select
+        - 1
+        - Fn::GetAZs: !Ref "AWS::Region"
+      CidrBlock: 10.0.255.0/24
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-PublicSubnet2
+      VpcId: !Ref VPC
+
+  InternetGateway:
+    Type: "AWS::EC2::InternetGateway"
+    Properties:
+      Tags:
+        - Key: "Name"
+          Value: !Sub ${VPC}-IGW1
+  GatewayToInternet:
+    Type: "AWS::EC2::VPCGatewayAttachment"
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+  PublicRouteTable1:
+    Type: "AWS::EC2::RouteTable"
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: "Name"
+          Value: !Sub ${VPC}-public-route-table1
+        - Key: "Gateway"
+          Value: !Ref GatewayToInternet
+
+  PublicRouteTable2:
+    Type: "AWS::EC2::RouteTable"
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: "Name"
+          Value: !Sub ${VPC}-public-route-table2
+        - Key: "Gateway"
+          Value: !Ref GatewayToInternet
+
+  PublicRoute1Hub:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PublicRouteTable1
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicRoute2Hub:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PublicRouteTable2
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PrivateRoute1GWHub:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NATGateway1
+
+  PrivateRoute2GWHub:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable2
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NATGateway2
+
+  PublicSubnetRouteTableAssociation1:
+    Type: "AWS::EC2::SubnetRouteTableAssociation"
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable1
+
+  PublicSubnetRouteTableAssociation2:
+    Type: "AWS::EC2::SubnetRouteTableAssociation"
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable2
+
+  ElasticIP1:
+    Type: "AWS::EC2::EIP"
+    Properties:
+      Domain: "vpc"
+
+  ElasticIP2:
+    Type: "AWS::EC2::EIP"
+    Properties:
+      Domain: "vpc"
+
+  NATGateway1:
+    Type: "AWS::EC2::NatGateway"
+    Properties:
+      AllocationId: !GetAtt ElasticIP1.AllocationId
+      SubnetId: !Ref PublicSubnet1
+
+  NATGateway2:
+    Type: "AWS::EC2::NatGateway"
+    Properties:
+      AllocationId: !GetAtt ElasticIP2.AllocationId
+      SubnetId: !Ref PublicSubnet2
+
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select
+        - 0
+        - Fn::GetAZs: !Ref "AWS::Region"
+      CidrBlock: 10.0.1.0/24
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-PrivateSubnet1
+      VpcId: !Ref VPC
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select
+        - 1
+        - Fn::GetAZs: !Ref "AWS::Region"
+      CidrBlock: 10.0.2.0/24
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-PrivateSubnet2
+      VpcId: !Ref VPC
+
+  PrivateRouteTable1:
+    Type: "AWS::EC2::RouteTable"
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: "Name"
+          Value: !Sub ${VPC}-Private-route-table1
+
+  PrivateRouteTable2:
+    Type: "AWS::EC2::RouteTable"
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: "Name"
+          Value: !Sub ${VPC}-Private-route-table2
+
+  PrivateSubnetRouteTableAssociation1:
+    Type: "AWS::EC2::SubnetRouteTableAssociation"
+    Properties:
+      SubnetId: !Ref PrivateSubnet1
+      RouteTableId: !Ref PrivateRouteTable1
+  PrivateSubnetRouteTableAssociation2:
+    Type: "AWS::EC2::SubnetRouteTableAssociation"
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      RouteTableId: !Ref PrivateRouteTable2
+
+  # Application Resources
+  EFSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: !Sub ${ApplicationName} EFS Key
+      Enabled: true
+      EnableKeyRotation: true
+      KeyUsage: ENCRYPT_DECRYPT
+      KeyPolicy:
+        Version: "2012-10-17"
+        Id: key-default-1
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:root
+            Action: kms:*
+            Resource: "*"
+          - Sid: "Allow Application instances access to the key."
+            Effect: "Allow"
+            Principal:
+              AWS: !GetAtt ApplicationInstanceRole.Arn
+            Action:
+              - "kms:Encrypt"
+              - "kms:Decrypt"
+              - "kms:ReEncrypt*"
+              - "kms:GenerateDataKey*"
+              - "kms:DescribeKey"
+            Resource: "*"
+      Tags:
+        - Key: Name
+          Value: !Sub ${ApplicationName} Key
+  EFSAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: alias/efs-prysm
+      TargetKeyId:
+        Ref: EFSKey
+  EFSFileSystem:
+    Type: AWS::EFS::FileSystem
+    Properties:
+      PerformanceMode: generalPurpose
+      Encrypted: true
+      KmsKeyId: !Ref EFSKey
+      FileSystemTags:
+        - Key: Name
+          Value: !Join [" ", [!Ref "AWS::StackName", "cluster shared-files"]]
+        - Key: Application
+          Value: !Ref AWS::StackId
+
+  EFSMountTarget1:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref EFSFileSystem
+      SecurityGroups:
+        - !GetAtt EFSSecurityGroup.GroupId
+      SubnetId: !Ref PrivateSubnet1
+
+  EFSMountTarget2:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref EFSFileSystem
+      SecurityGroups:
+        - !GetAtt EFSSecurityGroup.GroupId
+      SubnetId: !Ref PrivateSubnet2
+
+  EFSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable NFS access from Application Instances.
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - FromPort: 2049
+          IpProtocol: tcp
+          ToPort: 2049
+          SourceSecurityGroupId: !GetAtt ApplicationInstanceSecurityGroup.GroupId
+  ApplicationInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - !Sub ec2.${AWS::URLSuffix}
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: ELBPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: ec2:*
+                Resource: "*"
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonEC2RoleforSSM"
+  ApplicationInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - Ref: ApplicationInstanceRole
+
+  ApplicationAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        MinInstancesInService: 1
+        # PauseTime: PT10m
+        WaitOnResourceSignals: false
+    Properties:
+      LaunchConfigurationName: !Ref ApplicationLaunchConfiguration
+      VPCZoneIdentifier:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      MinSize: 1
+      MaxSize: 2
+      Cooldown: "300"
+      DesiredCapacity: 1
+      TargetGroupARNs:
+        - !Ref ApplicationLoadBalancerTargetGroup
+      Tags:
+        - Key: Name
+          Value: !Ref ApplicationName
+          PropagateAtLaunch: "true"
+    # CreationPolicy:
+    #   ResourceSignal:
+    #     Count: !Ref ApplicationMinNodes
+    #     Timeout: PT60M
+  ApplicationScalingPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref ApplicationAutoScalingGroup
+      PolicyType: TargetTrackingScaling
+      TargetTrackingConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ASGAverageCPUUtilization
+        TargetValue: 80
+  ApplicationLaunchConfiguration:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Metadata:
+      Comment: Install application
+      AWS::CloudFormation::Init:
+        configSets:
+          default:
+            - 01_setupCfnHup
+            - 02_config-amazon-cloudwatch-agent
+            - 03_restart_amazon-cloudwatch-agent
+            - 04_config_prysm
+          UpdateEnvironment:
+            - 02_config-amazon-cloudwatch-agent
+            - 03_restart_amazon-cloudwatch-agent
+        01_setupCfnHup:
+          files:
+            "/etc/cfn/cfn-hup.conf":
+              content: !Sub |
+                [main]
+                stack=${AWS::StackId}
+                region=${AWS::Region}
+                interval=1
+              mode: "000400"
+              owner: root
+              group: root
+            "/etc/cfn/hooks.d/amazon-cloudwatch-agent-auto-reloader.conf":
+              content: !Sub |
+                [cfn-auto-reloader-hook]
+                triggers=post.update
+                path=Resources.EC2Instance.Metadata.AWS::CloudFormation::Init.02_config-amazon-cloudwatch-agent
+                action=/opt/aws/bin/cfn-init -v --stack ${AWS::StackId} --resource EC2Instance --region ${AWS::Region} --configsets UpdateEnvironment
+                runas=root
+              mode: "000400"
+              owner: root
+              group: root
+            "/lib/systemd/system/cfn-hup.service":
+              content: !Sub |
+                [Unit]
+                Description=cfn-hup daemon
+                [Service]
+                Type=simple
+                ExecStart=/opt/aws/bin/cfn-hup
+                Restart=always
+                [Install]
+                WantedBy=multi-user.target
+          commands:
+            01enable_cfn_hup:
+              command: !Sub |
+                systemctl enable cfn-hup.service
+            02start_cfn_hup:
+              command: !Sub |
+                systemctl start cfn-hup.service
+
+        02_config-amazon-cloudwatch-agent:
+          files:
+            "/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json":
+              content: |
+                {
+                    "agent": {
+                        "metrics_collection_interval": 60,
+                        "logfile": "/opt/aws/amazon-cloudwatch-agent/logs/amazon-cloudwatch-agent.log",
+                        "debug": false
+                    },
+                    "logs": {
+                        "logs_collected": {
+                            "files": {
+                                "collect_list": [
+                                    {
+                                        "file_path": "/opt/aws/amazon-cloudwatch-agent/logs/amazon-cloudwatch-agent.log",
+                                        "log_group_name": "amazon-cloudwatch-agent.log",
+                                        "log_stream_name": "{instance_id}",
+                                        "timestamp_format": "%Y-%m-%dT%H:%M:%S"
+                                    },
+                                    {
+                                        "file_path": "/var/log/syslog",
+                                        "log_group_name": "/aws/linux/var/log/syslog",
+                                        "log_stream_name": "{instance_id}",
+                                        "timestamp_format": "%Y-%m-%dT%H:%M:%S"
+                                    },
+                                    {
+                                        "file_path": "/var/log/auth.log",
+                                        "log_group_name": "/aws/linux/var/log/auth",
+                                        "log_stream_name": "{instance_id}",
+                                        "timestamp_format": "%Y-%m-%dT%H:%M:%S"
+                                    },
+                                    {
+                                        "file_path": "/var/log/dpkg.log",
+                                        "log_group_name": "/aws/linux/var/log/dpkg",
+                                        "log_stream_name": "{instance_id}",
+                                        "timestamp_format": "%Y-%m-%dT%H:%M:%S"
+                                    },
+                                    {
+                                        "file_path": "/var/log/amazon/ssm/amazon-ssm-agent.log",
+                                        "log_group_name": "/amazon/ssm/amazon-ssm-agent",
+                                        "log_stream_name": "{instance_id}",
+                                        "timestamp_format": "%Y-%m-%dT%H:%M:%S"
+                                    }
+                                ]
+                            }
+                        },
+                        "force_flush_interval" : 15
+                    },
+                    "metrics": {
+                        "metrics_collected": {
+                            "collectd": {},
+                            "cpu": {
+                                "resources": [
+                                    "*"
+                                ],
+                                "measurement": [
+                                    {
+                                        "name": "cpu_usage_idle",
+                                        "rename": "CPU_USAGE_IDLE",
+                                        "unit": "Percent"
+                                    },
+                                    {
+                                        "name": "cpu_usage_nice",
+                                        "unit": "Percent"
+                                    },
+                                    "cpu_usage_guest"
+                                ],
+                                "totalcpu": false,
+                                "metrics_collection_interval": 10,
+                                "append_dimensions": {
+                                    "test": "test1",
+                                    "date": "2017-10-01"
+                                }
+                            },
+                            "netstat": {
+                                "measurement": [
+                                    "tcp_established",
+                                    "tcp_syn_sent",
+                                    "tcp_close"
+                                ],
+                                "metrics_collection_interval": 60
+                            },
+                            "disk": {
+                                "measurement": [
+                                    "used_percent"
+                                ],
+                                "resources": [
+                                    "*"
+                                ],
+                                "drop_device": true
+                            },
+                            "processes": {
+                                "measurement": [
+                                    "running",
+                                    "sleeping",
+                                    "dead"
+                                ]
+                            }
+                        },
+                        "append_dimensions": {
+                            "ImageId": "${aws:ImageId}",
+                            "InstanceId": "${aws:InstanceId}",
+                            "InstanceType": "${aws:InstanceType}",
+                            "AutoScalingGroupName": "${aws:AutoScalingGroupName}"
+                        },
+                        "aggregation_dimensions": [
+                            [
+                                "AutoScalingGroupName"
+                            ],
+                            [
+                                "InstanceId",
+                                "InstanceType"
+                            ],
+                            []
+                        ]
+                    }
+                }
+
+        03_restart_amazon-cloudwatch-agent:
+          commands:
+            01_stop_service:
+              command: /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a stop
+            02_start_service:
+              command: /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json -s
+
+        04_config_prysm:
+          files:
+            "/prysm-configure-env.sh":
+              content: !Sub |
+                #!/bin/bash -x
+
+                # Root EFS for prysm data.
+                echo "${EFSFileSystem}.efs.${AWS::Region}.${AWS::URLSuffix}:/ /EFS nfs4 nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2 0 0" >> /etc/fstab
+                mkdir -p /EFS
+                mount -a
+
+                # localhost redirects
+                sysctl net.ipv4.ip_forward=1 
+                iptables -t nat -A PREROUTING -p tcp --dport 3000 -j DNAT --to-destination 127.0.0.1:3000
+
+            "/install_prysm.sh":
+              content: |
+                #!/bin/bash -x
+                DEBIAN_FRONTEND=noninteractive && dpkg --configure -a
+                curl -L "https://github.com/docker/compose/releases/download/1.27.4/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+                chmod +x /usr/local/bin/docker-compose
+                curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
+                add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
+                apt update
+                apt install -y docker-ce docker-ce-cli containerd.io
+                systemctl enable docker.service
+                systemctl start docker.service
+                usermod -aG docker ubuntu
+                cd /EFS
+                git clone https://github.com/stefa2k/prysm-docker-compose.git
+                cd prysm-docker-compose
+                curl -LO https://github.com/ethereum/eth2.0-deposit-cli/releases/download/v0.3.0/eth2deposit-cli-1681a93-linux-amd64.tar.gz
+                tar -zxvf eth2deposit-cli-1681a93-linux-amd64.tar.gz
+                rm -rf eth2deposit-cli-1681a93-linux-amd64.tar.gz
+                mkdir -p launchpad/eth2.0-deposit-cli/
+                chown -R ubuntu /EFS/prysm-docker-compose
+
+          commands:
+            1-configure-efs:
+              command: bash /prysm-configure-env.sh
+            3-install-prysm:
+              command: bash /install_prysm.sh
+    Properties:
+      ImageId: !Ref Ubuntu18ImageId
+      SecurityGroups:
+        - !Ref ApplicationInstanceSecurityGroup
+      InstanceType: !Ref ApplicationInstanceType
+      BlockDeviceMappings:
+        - DeviceName: "/dev/sda1"
+          Ebs:
+            VolumeSize:
+              Ref: ApplicationInstanceStorageSize
+            VolumeType:
+              Ref: ApplicationInstanceStorageType
+            Iops:
+              Fn::If:
+                - ApplicationStorageWithIOPSCondition
+                - !Ref ApplicationInstanceStorageIOPS
+                - !Ref AWS::NoValue
+      IamInstanceProfile: !Ref ApplicationInstanceProfile
+      UserData:
+        Fn::Base64: !Sub |
+          #cloud-config
+          disable_root: true
+          repo_update: true
+          repo_upgrade: all
+
+          packages:
+          - python-setuptools
+          - python3-pip
+          - postgresql-client
+          - jq
+          - curl
+          - nfs-common
+          - htop
+          - collectd
+
+          runcmd:
+          - |
+            #!/bin/bash -x
+            wget https://s3.amazonaws.com/amazoncloudwatch-agent/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb -O /tmp/amazon-cloudwatch-agent.deb
+            dpkg -i /tmp/amazon-cloudwatch-agent.deb
+            mkdir -p /opt/aws/bin
+            python /usr/lib/python2.7/dist-packages/easy_install.py --script-dir /opt/aws/bin https://s3.${AWS::URLSuffix}/cloudformation-examples/aws-cfn-bootstrap-latest.tar.gz
+            /opt/aws/bin/cfn-init --stack ${AWS::StackName} --resource ApplicationLaunchConfiguration --region ${AWS::Region}
+            /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource ApplicationAutoScalingGroup --region ${AWS::Region}
+
+  ApplicationInstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref VPC
+      GroupDescription: Enable SSH from NetworkLoadbalancer, and HTTP from ApplicationLoadbalancer.
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: "22"
+          ToPort: "22"
+          CidrIp: 0.0.0.0/0
+        - CidrIp: 0.0.0.0/0
+          FromPort: "12000"
+          ToPort: "12000"
+          IpProtocol: udp
+        - CidrIp: 0.0.0.0/0
+          FromPort: "13000"
+          ToPort: "13000"
+          IpProtocol: tcp
+
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Scheme: internal
+      Subnets:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      Type: application
+      SecurityGroups:
+        - !Ref ApplicationLoadBalancerSecurityGroup
+  ApplicationLoadBalancerListener3000:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ApplicationLoadBalancerTargetGroup
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: "3000"
+      Protocol: "HTTP"
+
+  ApplicationLoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable HTTP from internal environment.
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - CidrIp: 10.0.0.0/8
+          FromPort: 3000
+          ToPort: 3000
+          IpProtocol: tcp
+      Tags:
+        - Key: Name
+          Value: ApplicationLoadBalancer Security Group
+  ApplicationLoadBalancerTargetGroup:
+    Type: "AWS::ElasticLoadBalancingV2::TargetGroup"
+    Description: |
+      Target group for the LoadBalancer. Note that the autoscaling group sets its
+      TargetGroupARN field to this target group, ensuring all instances are registered
+      with the target group
+    Properties:
+      HealthCheckIntervalSeconds: 30
+      HealthyThresholdCount: 3
+      Port: 80
+      Protocol: HTTP
+      UnhealthyThresholdCount: 3
+      HealthCheckPath: /users/sign_in
+      VpcId: !Ref VPC
+
+Outputs:
+  # Prysm Outputs
+  PrysmElasticLoadBalancerEndpoint:
+    Description: HTTP Access
+    Value: !GetAtt ApplicationLoadBalancer.DNSName
