@@ -13,4 +13,4 @@ cd /EFS/prysm-docker-compose
 
 and then follow the instructions here  
 
-https://github.com/stefa2k/prysm-docker-compose#minimal-setup-beacon--validator-only
+https://github.com/stefa2k/prysm-docker-compose#services
